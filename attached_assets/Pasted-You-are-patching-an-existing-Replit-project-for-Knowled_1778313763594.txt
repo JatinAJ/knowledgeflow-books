@@ -1,0 +1,292 @@
+You are patching an existing Replit project for "Knowledge Flow Books" (knowledgeflowbooks.com). The current site has placeholder/dummy book data. Goal: replace placeholders with the live 142-title catalog and ship it production-ready. DO NOT rebuild from scratch — preserve existing layout, components, and styling unless explicitly told to change them.
+
+CRITICAL CONSTRAINTS — read these before editing any code
+- This is a CATALOG site. NO checkout, NO cart, NO Stripe, NO on-site sales.
+- Every book has external "Buy" buttons that link out to retailers (Amazon, Apple Books, Google Play, Bookmundo, Kobo, Barnes & Noble, Lulu, StreetLib downstream stores).
+- Do NOT host free chapters, sample PDFs, or excerpts. Knowledge Flow titles are on KDP (under probation) and other exclusivity-sensitive platforms — hosting samples is a compliance risk.
+- Do NOT invent fake books. Pull the real catalog from one of two sources (see DATA below).
+- Do NOT invent buy URLs. If a store URL isn't known yet, mark it `coming-soon` and disable the button.
+- Do NOT add a login/account system.
+- DO preserve existing visual design and component structure where possible.
+
+BRAND IDENTITY (lock these in)
+- Name: Knowledge Flow Books
+- Tagline: "Knowledge that flows. Learning that lasts."
+- Tone: academic, scholarly, accessible, trustworthy. More serious than a lifestyle publisher. Think university press meets self-publishing.
+- Target reader: students, professionals upskilling, lifelong learners, medical/educational/technical audiences.
+- Sister brand mention (footer only, single line): "A part of the Itorzo family — see also Itorzo Publications (itorzopublications.com)"
+- Colors (adjust if existing site uses different palette — keep what's there if it works):
+  - Primary: deep teal #0F4C5C
+  - Accent: warm amber #E5A823
+  - Background light: #F7F4EC
+  - Background dark: #0B1820
+  - Text: #1A1A1A / #EAEAEA
+- Typography:
+  - Headings: Source Serif Pro or Lora (academic feel)
+  - Body: Inter or IBM Plex Sans
+
+DATA ARCHITECTURE — replace the placeholder layer
+
+Step 1. Define the canonical Book type at `lib/types.ts` (or the equivalent file in this project — search for the existing book type and replace its shape):
+​
+export type FormatType = "ebook" | "paperback" | "hardback" | "audiobook"
+export type StoreLink = {
+store:
+"amazon-kindle"
+"amazon-paperback"
+"amazon-hardback"
+"apple-books"
+"google-play-books"
+"kobo"
+"barnes-noble"
+"bookmundo"
+"audible"
+"google-play-audiobook"
+"authors-republic"
+url: string
+status?: "live" | "coming-soon"
+}
+export type BookFormat = {
+type: FormatType
+status: "live" | "coming-soon" | "none"
+stores: StoreLink[]
+}
+export type Book = {
+id: string
+slug: string
+title: string
+subtitle?: string
+authors: string[]            // pen name "Knowledge Flow" by default
+category:
+"medical"
+"science"
+"technology"
+"education"
+"engineering"
+"cookbook"
+"self-help"
+"finance"
+"language"
+"history"
+"law"
+"general"
+excerpt: string              // 1-2 sentence blurb
+description: string          // 2-3 paragraph longer copy
+tags: string[]
+edition?: string             // e.g. "2nd Edition", "Revised"
+publishedYear?: number
+isbn?: string
+asin?: string
+language: "en"
+pageCount?: number
+coverImage?: string          // optional URL
+formats: BookFormat[]
+}
+
+Step 2. Set up the data source with TWO modes (env-flagged so you can switch without code changes):
+
+Mode A (default for production) — Live WordPress REST API:
+- Endpoint: `https://knowledgeflowbooks.com/wp-json/wp/v2/book?per_page=100&_embed`
+- Fetch at build time using `getStaticProps` / `generateStaticParams` (whatever this project uses)
+- Cache for 1 hour (revalidate: 3600)
+- Map WP fields to the Book type:
+  - `title.rendered` → title
+  - `slug` → slug
+  - `excerpt.rendered` → excerpt (strip HTML)
+  - `content.rendered` → description (sanitize HTML)
+  - `_embedded["wp:featuredmedia"][0].source_url` → coverImage
+  - Custom fields (ACF) for ISBN, ASIN, format URLs — map whatever exists
+- Fallback gracefully if API is down: load from `data/books.json`
+
+Mode B (fallback) — local JSON:
+- File: `data/books.json`
+- Same Book[] shape
+- This will be regenerated from the Notion Title Metadata database export
+
+Env flag: `BOOK_SOURCE` = `"wp"` | `"local"` — default `"wp"` in production, `"local"` in dev.
+
+Step 3. Helper functions in `lib/books.ts`:
+- `getAllBooks(): Promise<Book[]>` — respects BOOK_SOURCE
+- `getBookBySlug(slug: string): Promise<Book | null>`
+- `getBooksByCategory(category: Book["category"]): Promise<Book[]>`
+- `getRelatedBooks(book: Book, limit = 4): Promise<Book[]>` — same category preferred
+- `searchBooks(query: string): Promise<Book[]>` — fuzzy search title + tags + authors
+- All functions normalize WP REST output to the canonical Book type
+
+PAGES TO UPDATE (do not delete existing routes, only update the data they consume)
+
+1. Home `/`
+   - Replace any "Featured Books" section that uses placeholder data with `getAllBooks()` filtered/sorted to top 8 (by publishedYear desc)
+   - Add a "Browse by Category" grid: cards for each category that has at least 1 book
+   - Add a "What we publish" intro paragraph: Knowledge Flow Books publishes academic, professional, and educational titles across medicine, science, technology, education, engineering, finance, and lifestyle. Founded by Itorzo. 142+ titles in print.
+   - Keep newsletter signup (Beehiiv embed — see NEWSLETTER below)
+
+2. Catalog `/books`
+   - Pull all books from `getAllBooks()`
+   - Filter by category, search, sort (title A-Z, newest, alphabetical by author)
+   - Loading skeletons during client-side filter
+   - Empty state: "No books match your filters."
+   - Show book count: "Showing X of Y books"
+
+3. Single book `/books/[slug]`
+   - Fetch via `getBookBySlug(slug)`, return 404 if not found
+   - Layout: cover (left, sticky on desktop), metadata + description (right)
+   - Where-to-buy panel — see WHERE-TO-BUY below
+   - Related books at bottom
+   - SEO: per-book Title, description, JSON-LD Book schema, Open Graph
+
+4. About `/about`
+   - Update story: Knowledge Flow Books is the academic and educational publishing arm of Itorzo. Focus on practical, accessible knowledge for students, professionals, and lifelong learners. 142 titles across 12 categories. Distributed worldwide via Amazon, Apple Books, Google Play, Bookmundo, Kobo, Barnes & Noble, and Lulu.
+   - Stats counter: 142 Books · 12 Categories · 50+ Countries · 4 Formats
+   - Mention sister brand Itorzo Publications (lifestyle/cookbooks)
+
+5. Categories `/category/[slug]` (create if missing)
+   - One landing page per category
+   - SEO-optimized for "[category] books" search terms
+   - Example URLs:
+     - /category/medical
+     - /category/science
+     - /category/technology
+     - /category/education
+     - /category/engineering
+     - /category/cookbook
+     - /category/self-help
+     - /category/finance
+
+6. Contact `/contact` (keep existing form, ensure it works)
+   - Email: sales@knowledgeflowbooks.com
+   - Add submission CTA linking to /submit
+
+7. Submit / Author Inquiries `/submit` (create if missing)
+   - Pitch what Knowledge Flow looks for: academic and educational titles, technical reference, instructional cookbooks, professional development
+   - Form with: name, email, manuscript title, category, synopsis, sample chapter URL (Google Doc link — DO NOT host samples on this site)
+   - Posts to `/api/submit` — for now logs to console, leave TODO for real backend
+
+WHERE-TO-BUY PANEL — render exactly this way
+
+Group buy links by format. Render a format section ONLY if its `status` is "live" or "coming-soon" AND its `stores` array has entries.
+
+Visual structure per format:
+- Section header: format icon + format name (Ebook / Paperback / Hardback / Audiobook)
+- Status pill: "Available now" (green) / "Coming soon" (amber)
+- Vertical list of store buttons:
+  - Each: store icon/logo + store name + outbound arrow
+  - `<a href={url} target="_blank" rel="noopener noreferrer">`
+  - Disabled state for "#coming-soon" with tooltip "Link coming soon"
+
+Format icons (Lucide React):
+- ebook → BookOpen
+- paperback → Book
+- hardback → BookMarked
+- audiobook → Headphones
+
+Store display names (use exactly):
+amazon-kindle → "Amazon Kindle"
+amazon-paperback → "Amazon Paperback"
+amazon-hardback → "Amazon Hardback"
+apple-books → "Apple Books"
+google-play-books → "Google Play Books"
+kobo → "Kobo"
+barnes-noble → "Barnes & Noble"
+bookmundo → "Bookmundo"
+lulu → "Lulu"
+audible → "Audible"
+google-play-audiobook → "Google Play Audiobooks"
+authors-republic → "Authors Republic"
+
+NEWSLETTER (Beehiiv)
+
+Replace any existing newsletter form with a `<NewsletterForm />` component:
+- Beehiiv embed using env var `NEXT_PUBLIC_BEEHIIV_PUB_ID`
+- Form action URL: `https://embeds.beehiiv.com/${pubId}`
+- Fallback: if pub ID is missing, render a placeholder form posting to `/api/subscribe` (console.log for now)
+- Comment in component: "// To wire up: set NEXT_PUBLIC_BEEHIIV_PUB_ID in .env. Get from app.beehiiv.com → Publication → Embed."
+
+Place the newsletter form on:
+- Home page (above footer)
+- About page (mid-page)
+- Every single book page (sidebar or below description)
+- Footer (compact version)
+
+SEO HARDENING
+
+- Per-book JSON-LD `<script type="application/ld+json">` Book schema:
+​
+{
+"@context": "https://schema.org",
+"@type": "Book",
+"name": "<title>",
+"author": { "@type": "Organization", "name": "Knowledge Flow" },
+"publisher": { "@type": "Organization", "name": "Knowledge Flow Books", "url": "https://knowledgeflowbooks.com" },
+"inLanguage": "en",
+"isbn": "<isbn>",
+"image": "<coverImage>",
+"url": "https://knowledgeflowbooks.com/books/<slug>"
+}
+- Home page Organization schema with name, url, logo, sameAs (social links)
+- Per-page canonical URLs
+- Per-page Open Graph + Twitter card tags
+- robots.txt allowing all major crawlers
+- sitemap.xml auto-generated from book slugs + static pages
+- 301 redirects for any old placeholder slugs to new ones if they changed
+
+PERFORMANCE
+
+- Use next/image (or equivalent) for all cover images with proper width/height
+- Lazy-load below-the-fold book grids
+- Preload only critical fonts
+- Lighthouse target: 90+ performance, 100 accessibility, 100 best practices, 100 SEO
+
+ACCESSIBILITY
+
+- Semantic HTML throughout
+- All images have meaningful alt text (book title for covers)
+- Keyboard navigation works on the entire site
+- Focus states visible
+- Color contrast WCAG 2.1 AA minimum
+- Skip-to-content link
+
+GLOBAL POLISH
+
+- Loading states for every async operation (don't show blank screens)
+- Error boundaries with fallback UI ("Something went wrong. Try refreshing.")
+- 404 page: "This page wandered off. Browse the catalog instead."
+- 500 page: "Something broke. Email sales@knowledgeflowbooks.com if it persists."
+- Smooth scroll
+- Subtle hover lifts on book cards (translate-y -2px, shadow grows)
+- Cmd+K search modal
+- Dark mode toggle (if not already present)
+
+README UPDATES
+
+Append these sections:
+- "Updating book data" — explain the WP REST API source vs local JSON fallback, when to use each, how to switch via BOOK_SOURCE env var
+- "Newsletter" — Beehiiv setup steps
+- "Adding a new category" — explain how to add to the union type and create a category page
+- "Going storefront later" — note that the Book type's formats[].stores[] structure can be extended with a `directSale: { stripePriceId, fileUrl }` field per format if direct sales become viable
+
+DELIVERABLE
+
+When done:
+1. Run the dev server
+2. Show the home page with real books loaded from WP API
+3. Show /books with the full 142-title catalog, filters working
+4. Show one /books/[slug] page with the Where-to-buy panel rendering correctly
+5. Show /about with updated story
+6. Confirm newsletter form renders (will show placeholder if Beehiiv pub ID isn't set)
+7. Print Lighthouse scores
+
+IF YOU RUN INTO ISSUES
+
+- If WP REST API returns fewer than 142 books, check pagination — increase per_page or implement a loop
+- If WP API custom fields aren't exposing format URLs, add a TODO and fall back to JSON for those titles
+- If existing components have placeholder data hardcoded, replace it with prop-based real data — don't leave any "Lorem Ipsum" or "Sample Book" strings anywhere
+- If unsure about a design decision, preserve existing UX — only change data sources, not layouts
+
+DO NOT
+- Do NOT rebuild the project from scratch
+- Do NOT delete existing styling unless it's actively broken
+- Do NOT invent buy URLs that don't exist
+- Do NOT host free book chapters or PDFs
+- Do NOT add login/auth
+- Do NOT add a checkout flow
